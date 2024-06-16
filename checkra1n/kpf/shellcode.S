@@ -34,6 +34,10 @@
 .globl _vnode_check_open_shc_ptr
 .globl _vnode_check_open_shc_end
 
+.globl _exec_mach_imgact_hook
+.globl _exec_mach_imgact_hook_back
+.globl _exec_mach_imgact_hook_end
+
 .align 2
 _sandbox_shellcode:
 b sandbox_shellcode_m
@@ -73,9 +77,16 @@ br x6
 amfi_execve_hook: // you can't kill me :P (makes sure amfi doesn't try to kill our binaries)
 ldr x0, [sp, #8] // cs_flags
 ldr w1, [x0]
+tbnz w1, 0x1, amfi_execve_hook$adhoc
+amfi_execve_hook$not_adhoc:
+and w1, w1,   #(~0x04000000) // clearing CS_PLATFORM_BINARY
+b amfi_execve_hook$generic
+amfi_execve_hook$adhoc:
 orr w1, w1,   #0x04000000 // CS_PLATFORM_BINARY
-orr w1, w1,   #0x000f // CS_VALID | CS_ADHOC | CS_GET_TASK_ALLOW | CS_INSTALLER
-and w1, w1, #(~0x3f00) // clearing CS_HARD | CS_KILL | CS_CHECK_EXPIRATION | CS_RESTRICT | CS_ENFORCEMENT | CS_REQUIRE_LV
+amfi_execve_hook$generic:
+orr w1, w1,   #0x0001 // CS_VALID
+orr w1, w1,   #0x000c // CS_GET_TASK_ALLOW | CS_INSTALLER
+and w1, w1,   #(~0x3f00) // clearing CS_HARD | CS_KILL | CS_CHECK_EXPIRATION | CS_RESTRICT | CS_ENFORCEMENT | CS_REQUIRE_LV
 //and w1, w1, #(~0x00000000)
 str w1, [x0]
 mov x0, xzr
@@ -235,6 +246,7 @@ vnode_check_open_orig:
 .globl _launchd_execve_hook_ptr
 .globl _launchd_execve_hook_end
 .globl _launchd_execve_hook_offset
+.globl _launchd_execve_hook_mach_arg
 _launchd_execve_hook:
 b          launchd_execve_hook$start
 
@@ -266,6 +278,7 @@ mov        w1, #0x1
 lsl        w2, w1, w8    // map_page_size
 
 add        x1, sp, #0x40 // &scratch_addr
+_launchd_execve_hook_mach_arg:
 mov        w3, #0x1      // VM_FLAGS_ANYWHERE
 mov        x4, #0x0      // VM_KERN_MEMORY_NONE
 ldr        x8, mach_vm_allocate_kernel
@@ -363,6 +376,22 @@ mountpoint:
 
 .align 2
 _launchd_execve_hook_end:
+
+.align 2
+_exec_mach_imgact_hook:
+exec_mach_imgact_hook$start:
+mov w0, 0 // set FALSE (gets replaced with real register by kpf)
+ldr w8, [sp, #0x0] // load_result.platform_binary (gets replaced with real offset by kpf)
+cmp w8, #0x0
+beq exec_mach_imgact_hook$do_set
+ldr w8, [sp, #0x0] // load_result.csflags (gets replaced with real offset by kpf)
+tbz w8, 0x1, exec_mach_imgact_hook$do_set // check CS_ADHOC
+mov w0, 1 // set TRUE (gets replaced with real register by kpf)
+exec_mach_imgact_hook$do_set:
+_exec_mach_imgact_hook_back:
+b .
+_exec_mach_imgact_hook_end:
+
 _sandbox_shellcode_end:
 
 

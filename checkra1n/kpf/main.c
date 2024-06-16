@@ -157,7 +157,8 @@ static void kpf_kernel_version_init(xnu_pf_range_t *text_const_range)
 // Imports from shellcode.S
 extern uint32_t sandbox_shellcode[], sandbox_shellcode_setuid_patch[], sandbox_shellcode_ptrs[], sandbox_shellcode_end[];
 extern uint32_t vnode_check_open_shc[], vnode_check_open_shc_ptr[], vnode_check_open_shc_end[];
-extern uint32_t launchd_execve_hook[], launchd_execve_hook_ptr[], launchd_execve_hook_offset[];
+extern uint32_t exec_mach_imgact_hook[], exec_mach_imgact_hook_back[], exec_mach_imgact_hook_end[];
+extern uint32_t launchd_execve_hook[], launchd_execve_hook_ptr[], launchd_execve_hook_offset[], launchd_execve_hook_mach_arg[];
 
 uint32_t* _mac_mount = NULL;
 
@@ -611,6 +612,7 @@ bool vm_fault_enter_callback(struct xnu_pf_patch* patch, uint32_t* opcode_stream
         if (((*try_loc|(i<<5))&0xFD07FFE0) == (0x34000000|i<<5)) {
             // Found it!
             *try_loc = NOP;
+            DEVLOG("vm_fault_enter at 0x%llx", xnu_ptr_to_va(try_loc));
             puts("KPF: Found vm_fault_enter");
             found_vm_fault_enter = true;
             xnu_pf_disable_patch(patch);
@@ -631,10 +633,11 @@ bool vm_fault_enter_callback14(struct xnu_pf_patch* patch, uint32_t* opcode_stre
     DEVLOG("Trying vm_fault_enter at 0x%llx", xnu_ptr_to_va(opcode_stream));
     // r2 /x
     // Make sure this was preceded by a "tbz w[16-31], 2, ..." that jumps to the code we're currently looking at
-    uint32_t *tbz = find_prev_insn(opcode_stream, 0x18, 0x36100010, 0xfff80010);
+    uint32_t *tbz = find_prev_insn(opcode_stream, 0x1c, 0x36100010, 0xfff80010);
     if(!tbz)
     {
         // This isn't our TBZ
+        DEVLOG("This isn't our TBZ");
         return false;
     }
     tbz += sxt32(*tbz >> 5, 14); // uint32 takes care of << 2
@@ -642,9 +645,11 @@ bool vm_fault_enter_callback14(struct xnu_pf_patch* patch, uint32_t* opcode_stre
     if(tbz > opcode_stream || opcode_stream - tbz > 2)
     {
         // Apparently still not our TBZ
+        DEVLOG("Apparently still not our TBZ");
         return false;
     }
     opcode_stream[0] = NOP;
+    DEVLOG("vm_fault_enter at 0x%llx", xnu_ptr_to_va(opcode_stream));
     puts("KPF: Found vm_fault_enter");
     found_vm_fault_enter = true;
     xnu_pf_disable_patch(patch);
@@ -1027,6 +1032,7 @@ void kpf_apfs_patches(xnu_pf_patchset_t* patchset, bool have_union) {
         xnu_pf_maskmatch(patchset, "apfs_patch_rename", i_matches, i_masks, sizeof(i_matches)/sizeof(uint64_t), true, (void*)kpf_apfs_patches_rename);
     }
 }
+
 static uint32_t* amfi_ret;
 bool kpf_amfi_execve_tail(struct xnu_pf_patch* patch, uint32_t* opcode_stream) {
     if(amfi_ret)
@@ -1588,6 +1594,40 @@ void kpf_proc_selfname_patch(xnu_pf_patchset_t* patchset)
     
     xnu_pf_maskmatch(patchset, "proc_selfname", i_matches, i_masks, sizeof(i_masks)/sizeof(uint64_t), false, (void*)proc_selfname_callback);
     
+    // iOS 18
+    uint64_t ii_matches[] =
+    {
+        0xf9400000, // ldr xN, [xM, ...]
+        0xb4000000, // cbz x*, ...
+        0x93407c02, // sxtw x2, wy
+        0x91000001, // add x1, xn, #imm
+        0xaa0003e0, // mov x0, xN
+        0x00000000, // ldp
+        0x00000000, // ldp
+        0x14000000, // b 0x...
+        0x90000000, // adrp
+        0xf9400000, // ldr xN, [xM, ...]
+        0xb5000000, // cbnz x*, 0x...
+    };
+    
+    uint64_t ii_masks[] =
+    {
+        0xffc00000, // ldr xN, [xM, ...]
+        0xff000000, // cbz x*, ...
+        0xffff7c0f, // sxtw x2, wy
+        0xff00000f, // add xn, xn, #imm
+        0xffe0ffff, // mov x0, xn
+        0x00000000, // ldp
+        0x00000000, // ldp
+        0xfc000000, // b 0x...
+        0x9f000000, // adrp
+        0xffc00000, // ldr xN, [xM, ...]
+        0xff000000,
+    };
+    
+    xnu_pf_maskmatch(patchset, "proc_selfname", ii_matches, ii_masks, sizeof(ii_masks)/sizeof(uint64_t), false, (void*)proc_selfname_callback);
+
+    
 }
 
 // for launchd __mac_execve hook
@@ -1695,16 +1735,7 @@ bool load_init_program_at_path_callback(struct xnu_pf_patch *patch, uint32_t *op
         printf("KPF: Found vm_map_page_size offset at 0x%x\n", vm_map_page_size_off);
     }
     
-    bl = NULL;
-    for(int i = 0; i < 0x80; i++)
-    {
-        if(start[i]     == 0x52800023 &&
-           start[i + 1] == 0x52800004)
-        {
-            bl = find_next_insn(start + i, 10, 0x94000000, 0xfc000000); // bl
-            if(bl) break;
-        }
-    }
+    bl = find_next_insn(start, 0x80, 0x94000000, 0xfc000000); // bl
     if(!bl) return false;
     
     mach_vm_allocate_kernel = follow_call(bl);
@@ -1787,6 +1818,7 @@ void kpf_md0oncores_patch(xnu_pf_patchset_t* patchset)
 
 }
 
+#if 0
 bool wtf_callback(struct xnu_pf_patch *patch, uint32_t *opcode_stream)
 {
     uint32_t *ret = find_next_insn(opcode_stream, 400, RET, 0xffffffff);
@@ -1847,6 +1879,106 @@ void kpf_wtf_patch(xnu_pf_patchset_t* patchset)
     };
     xnu_pf_maskmatch(patchset, "WTF", matches, masks, sizeof(masks)/sizeof(uint64_t), true, (void*)wtf_callback);
 
+}
+#endif
+
+bool found_platform_binary_check = false;
+uint32_t* platform_binary_check = NULL;
+uint32_t platform_binary_check_cset_reg = 0;
+uint32_t load_result_platform_binary_offset = 0;
+uint32_t load_result_csflag_offset = 0;
+bool platform_binary_check_callback(struct xnu_pf_patch *patch, uint32_t *opcode_stream)
+{
+    if (found_platform_binary_check) {
+        DEVLOG("platform_binary_check_callback: already ran, skipping...");
+        return false;
+    }
+    
+    uint32_t* match = opcode_stream;
+    bool found = false;
+    for (int i = 0; i < 0x100; i++) {
+        if (((match[i + 0] & 0xfff003ff) == 0xb94003e8) && // ldr w8, [sp, #{0x0-0xffc}]
+             (match[i + 1] == 0x7100011f) && // cmp w8, #0x0
+            ((match[i + 2] & 0xffffffe0) == 0x1a9f07e0)) { // cset wN, ne
+            found = true;
+            match += i;
+            break;
+        }
+    }
+    if (!found) {
+        DEVLOG("platform_binary_check_callback: cmp/cset not found");
+        //return false;
+    }
+    
+    load_result_platform_binary_offset = ((match[0] >> 10) & 0x3ff) << 2;
+    platform_binary_check_cset_reg = match[2] & 0x1f;
+    DEVLOG("platform_binary_check_callback: load_result_platform_binary_offset %d", load_result_platform_binary_offset);
+    DEVLOG("platform_binary_check_callback: platform_binary_check_cset_reg %d", platform_binary_check_cset_reg);
+    
+    platform_binary_check = match;
+    DEVLOG("platform_binary_check_callback: platform_binary_check %0llx", xnu_ptr_to_va(platform_binary_check));
+    
+    match = opcode_stream;
+    found = false;
+    for (int i = 0; i < 0x100; i++) {
+        if (((match[-i + 0] & 0xfffffff0) == 0x529f63a0) && // mov w{0-15}, #0xfb1d
+            ((match[-i + 1] & 0xfffffff0) == 0x72bc4e60)) { // movk w{0-15}, #0xe273, lsl #16
+            found = true;
+            match -= i;
+            break;
+        }
+    }
+    if (!found) {
+        DEVLOG("platform_binary_check_callback: csflag not found");
+        return false;
+    }
+    
+    uint32_t* ldr = match;
+    found = false;
+    for (int i = 0; i < 0x100; i++) {
+        if (((ldr[-i + 0] & 0xfff003ff) == 0xb94003e8) && // ldr w8, [sp, #{0x0-0xffc}]
+            ((ldr[-i + 1] & 0xfef8001f) == 0x36000008)) { // tb{n}z w8, 0x0, xxx
+            found = true;
+            ldr -= i;
+            break;
+        }
+    }
+    if (!found) {
+        DEVLOG("platform_binary_check_callback: ldr/tb{n}z not found");
+        return false;
+    }
+    
+    load_result_csflag_offset = ((ldr[0] >> 10) & 0x3ff) << 2;
+    DEVLOG("platform_binary_check_callback: load_result_csflag_offset %d", load_result_csflag_offset);
+    
+    puts("KPF: Found platform_binary_check");
+    found_platform_binary_check = true;
+    return true;
+}
+
+void kpf_platform_binary_check_patch(xnu_pf_patchset_t* patchset)
+{
+    uint64_t matches[] = {
+        0xaa1003e0, // mov x0, x{16-30}
+        0xd2800001, // mov x1, #0x0
+        0xd2800002, // mov x2, #0x0
+        0x52800003, // mov w3, #0x0
+        0x528000a4, // mov w4, #0x5
+        0xd2800005, // mov x5, #0x0
+        0x94000000, // bl _psignal_internal
+    };
+    
+    uint64_t masks[] = {
+        0xfff0ffff,
+        0xffffffff,
+        0xffffffff,
+        0xffffffff,
+        0xffffffff,
+        0xffffffff,
+        0xfc000000,
+    };
+    
+    xnu_pf_maskmatch(patchset, "platform_binary_check", matches, masks, sizeof(masks)/sizeof(uint64_t), true, (void*)platform_binary_check_callback);
 }
 /* -- bakera1n -- */
 
@@ -2183,12 +2315,16 @@ static void kpf_cmd(const char *cmd, char *args)
             kpf_proc_selfname_patch(xnu_text_exec_patchset);
         }
     }
-    if(gKernelVersion.darwinMajor >= 23)
-    {
+    
+#if 0
+    if (gKernelVersion.darwinMajor >= 23) {
         // ios 17
         kpf_wtf_patch(xnu_text_exec_patchset);
     }
-
+#endif
+    
+    kpf_platform_binary_check_patch(xnu_text_exec_patchset);
+    
     xnu_pf_emit(xnu_text_exec_patchset);
     xnu_pf_apply(text_exec_range, xnu_text_exec_patchset);
     xnu_pf_patchset_destroy(xnu_text_exec_patchset);
@@ -2312,6 +2448,27 @@ static void kpf_cmd(const char *cmd, char *args)
         PATCH_OP(ops, mpo_vnode_check_open, open_shellcode + shellcode_delta);
     }
     
+    if (platform_binary_check) {
+        uint32_t* shc_start = (uint32_t*)(exec_mach_imgact_hook - shellcode_from + shellcode_to);
+        
+        shc_start[0] |= platform_binary_check_cset_reg & 0x1f;
+        shc_start[1] |= ((load_result_platform_binary_offset >> 2) & 0x3ff) << 10;
+        shc_start[4] |= ((load_result_csflag_offset >> 2) & 0x3ff) << 10;
+        shc_start[6] |= platform_binary_check_cset_reg & 0x1f;
+        
+        uint32_t delta = shc_start - platform_binary_check;
+        delta &= 0x03ffffff;
+        delta |= 0x14000000;
+        *platform_binary_check = delta;
+        
+        uint32_t* shc_back = (uint32_t*)(exec_mach_imgact_hook_back - shellcode_from + shellcode_to);
+        platform_binary_check += 3;
+        delta = platform_binary_check - shc_back;
+        delta &= 0x03ffffff;
+        delta |= 0x14000000;
+        *shc_back = delta;
+    }
+    
     if(rootvp_string_match)
     {
         // check!
@@ -2325,7 +2482,7 @@ static void kpf_cmd(const char *cmd, char *args)
         uint64_t* repatch_launchd_execve_hook_ptrs = (uint64_t*)(launchd_execve_hook_ptr - shellcode_from + shellcode_to);
         uint32_t* repatch_launchd_execve_hook = (uint32_t*)(launchd_execve_hook - shellcode_from + shellcode_to);
         uint32_t* repatch_launchd_execve_hook_offset = (uint32_t*)(launchd_execve_hook_offset - shellcode_from + shellcode_to);
-        
+        uint32_t* repatch_launchd_execve_hook_mach_arg = (uint32_t*)(launchd_execve_hook_mach_arg - shellcode_from + shellcode_to);
         if (repatch_launchd_execve_hook_ptrs[0] != 0x4141414141414141) {
             panic("Shellcode corruption");
         }
@@ -2336,6 +2493,11 @@ static void kpf_cmd(const char *cmd, char *args)
         
         repatch_launchd_execve_hook_offset[0] |= ((current_map_off >> 3) & 0xfff) << 10;
         repatch_launchd_execve_hook_offset[2] |= ((vm_map_page_size_off >> 2) & 0x7ff) << 11;
+        
+        if(gKernelVersion.darwinMajor >= 24) {
+            repatch_launchd_execve_hook_mach_arg[0] = 0xd2800003; // mov x3, #0x0
+            repatch_launchd_execve_hook_mach_arg[1] = NOP;
+        }
         
         uint32_t delta = (&repatch_launchd_execve_hook[0]) - mac_execve_hook;
         delta &= 0x03ffffff;
