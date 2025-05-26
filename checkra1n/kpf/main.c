@@ -1818,6 +1818,32 @@ void kpf_md0oncores_patch(xnu_pf_patchset_t* patchset)
 
 }
 
+bool spawn_validate_persona_callback(struct xnu_pf_patch *patch, uint32_t *opcode_stream)
+{
+    opcode_stream[0] = 0x14000005;
+    puts("KPF: Found spawn_validate_persona");
+    return true;
+}
+
+void kpf_spawn_validate_persona_patch(xnu_pf_patchset_t* patchset)
+{
+    uint64_t matches[] =
+    {
+        0x340000a8,
+        0xb9400a88,
+        0x34fffda8,
+        0xb9400e88,
+    };
+    uint64_t masks[] =
+    {
+        0xffffffff,
+        0xffffffff,
+        0xffffffff,
+        0xffffffff,
+    };
+    xnu_pf_maskmatch(patchset, "spawn_validate_persona", matches, masks, sizeof(masks)/sizeof(uint64_t), true, (void*)spawn_validate_persona_callback);
+}
+
 #if 0
 bool wtf_callback(struct xnu_pf_patch *patch, uint32_t *opcode_stream)
 {
@@ -2324,6 +2350,10 @@ static void kpf_cmd(const char *cmd, char *args)
 #endif
     
     kpf_platform_binary_check_patch(xnu_text_exec_patchset);
+    
+    if(gKernelVersion.darwinMajor >= 24) {
+        kpf_spawn_validate_persona_patch(xnu_text_exec_patchset);
+    }
     
     xnu_pf_emit(xnu_text_exec_patchset);
     xnu_pf_apply(text_exec_range, xnu_text_exec_patchset);

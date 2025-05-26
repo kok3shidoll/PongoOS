@@ -30,7 +30,7 @@
 #include <recfg/recfg_soc.h>
 
 #define IRQ_T8015_SEP_INBOX_NOT_EMPTY 0x79
-// #define SEP_DEBUG
+#define SEP_DEBUG 1
 
 struct mailbox_registers32 {
     volatile uint32_t dis_int; // 0x0
@@ -100,6 +100,12 @@ void sepfw_kpf(void* sepfw_bytes, size_t sepfw_size) {
             break;
         } else if (insn_stream[i] == 0xe1930200) { // orrs r0, r3, r0, lsl 4
             insn_stream[i] = 0xe1500000; // cmp r0, r0
+#ifdef SEP_DEBUG
+            fiprintf(stderr, "patched out bpr check\n");
+#endif
+            break;
+        } else if (insn_stream[i] == 0xe1910200) { // orrs r0, r1, r0, lsl 4
+            insn_stream[i+4] = 0xE320f000; // nop
 #ifdef SEP_DEBUG
             fiprintf(stderr, "patched out bpr check\n");
 #endif
